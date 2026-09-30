@@ -1,4 +1,4 @@
-import * as THREE from "three";
+import * as THREE from "three/webgpu";
 import Experience from "./Experience";
 
 export default class Renderer {
@@ -7,7 +7,7 @@ export default class Renderer {
     sizes: Experience["sizes"];
     scene: THREE.Scene;
     camera: Experience["camera"];
-    instance!: THREE.WebGLRenderer;
+    instance!: THREE.WebGPURenderer;
 
     constructor() {
         this.experience = Experience.instance;
@@ -20,12 +20,12 @@ export default class Renderer {
     }
 
     setInstance() {
-        this.instance = new THREE.WebGLRenderer({
+        this.instance = new THREE.WebGPURenderer({
             canvas: this.canvas,
             antialias: true,
             alpha: true,
         });
-        this.instance.setClearColor(0x000000, 0);
+        this.instance.setClearColor("#000000", 0);
         this.instance.setSize(this.sizes.width, this.sizes.height);
         this.instance.setPixelRatio(this.sizes.pixelRatio);
     }
@@ -35,7 +35,7 @@ export default class Renderer {
         this.instance.setPixelRatio(this.sizes.pixelRatio);
     }
 
-    update() {
-        this.instance.render(this.scene, this.camera.instance);
+    async update() {
+        await this.instance.renderAsync(this.scene, this.camera.instance);
     }
 }

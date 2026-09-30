@@ -1,126 +1,117 @@
-import * as THREE from "three";
+import * as THREE from "three/webgpu";
+import { time, sin, cos, vec3 } from "three/tsl";
 import Experience from "../Experience";
-import SeededRandom from "../Utils/SeededRandom";
-import { gsap } from "gsap";
+import ParticleSystem from "./ParticleSystem";
+import { MeshSurfaceSampler } from "three/addons/math/MeshSurfaceSampler.js";
+import * as BufferGeometryUtils from "three/addons/utils/BufferGeometryUtils.js";
 
 export default class World {
     experience: Experience;
     scene: THREE.Scene;
-    projectGroup!: THREE.Group;
-    randomGen: SeededRandom;
+    resources: Experience["resources"];
+    cube!: THREE.Mesh;
+    particleSystem!: ParticleSystem;
 
-    // The exact variables used in the original source code
-    private targetGroupQuaternion = new THREE.Quaternion();
-    private _cameraWorldQuat = new THREE.Quaternion();
-    private _groupWorldQuat = new THREE.Quaternion();
-    private _groupInverseQuat = new THREE.Quaternion();
-
-    private currentFocusIndex: number = 0;
+    raycaster = new THREE.Raycaster();
+    mouse = new THREE.Vector2(-999, -999);
+    plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
+    planeIntersect = new THREE.Vector3();
+    previousIntersect = new THREE.Vector3();
+    mouseSpeed = 0;
 
     constructor() {
         this.experience = Experience.instance;
         this.scene = this.experience.scene;
+        this.resources = this.experience.resources;
 
-        this.randomGen = new SeededRandom(98765);
-
-        const ambientLight = new THREE.AmbientLight(0xffffff, 1);
+        const ambientLight = new THREE.AmbientLight(0xffffff, 3);
         this.scene.add(ambientLight);
 
-        this.setProjects();
-        this.setTestListener();
-    }
-
-    setProjects() {
-        this.projectGroup = new THREE.Group();
-        this.scene.add(this.projectGroup);
-
-        const minRadius = 6;
-        const maxRadius = 8;
-
-        const projectsData = new Array(28).fill({ name: "Project" });
-
-        const meshMaterial = new THREE.MeshBasicMaterial({
-            color: 0x4444ff,
-            side: THREE.DoubleSide,
+        this.resources.on("ready", () => {
+            this.setModel();
+            window.dispatchEvent(
+                new CustomEvent("playMusic", {
+                    detail: { name: "background" },
+                }),
+            );
         });
 
-        const totalProjects = projectsData.length;
-        const goldenRatio = (1 + Math.sqrt(5)) / 2;
-
-        projectsData.forEach((project, i) => {
-            const y = 1 - (i / (totalProjects - 1)) * 2;
-            const radiusAtY = Math.sqrt(1 - y * y);
-            const theta = (Math.PI * 2 * i) / goldenRatio;
-
-            const randomRadius = this.randomGen.range(minRadius, maxRadius);
-
-            const x = Math.cos(theta) * radiusAtY;
-            const z = Math.sin(theta) * radiusAtY;
-
-            const geometry = new THREE.PlaneGeometry(1.5, 1);
-            const mesh = new THREE.Mesh(geometry, meshMaterial);
-
-            mesh.position.set(x, y, z).normalize().multiplyScalar(randomRadius);
-
-            mesh.userData = {
-                normalizedPosition: mesh.position.clone().normalize(),
-                originalRadius: randomRadius,
-            };
-
-            this.projectGroup.add(mesh);
+        window.addEventListener("mousemove", (event) => {
+            this.mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+            this.mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
         });
     }
 
-    setTestListener() {
-        window.addEventListener("keydown", (event) => {
-            if (event.key.toLowerCase() === "a") {
-                this.currentFocusIndex =
-                    (this.currentFocusIndex + 1) %
-                    this.projectGroup.children.length;
-                const nextMesh = this.projectGroup.children[
-                    this.currentFocusIndex
-                ] as THREE.Mesh;
-                this.focusOnProject(nextMesh);
+    setModel() {
+        const gltf = this.resources.items.sceneModel;
+        const targetParticleCount = 1000;
+
+        const geometries: THREE.BufferGeometry[] = [];
+
+        gltf.scene.traverse((child: THREE.Object3D) => {
+            if (child instanceof THREE.Mesh) {
+                const clonedGeometry = child.geometry.clone();
+                clonedGeometry.applyMatrix4(child.matrixWorld);
+                geometries.push(clonedGeometry);
             }
         });
-    }
 
-    focusOnProject(mesh: THREE.Mesh) {
-        // 1. Calculate the rotation needed to center the mesh
-        const targetDirection = new THREE.Vector3(0, 0, 1);
-        const childDirection = mesh.userData.normalizedPosition;
+        if (geometries.length > 0) {
+            const mergedGeometry =
+                BufferGeometryUtils.mergeGeometries(geometries);
 
-        // 2. Instead of GSAP, we just store this target quaternion.
-        // The update() loop will handle the smooth animation organically.
-        this.targetGroupQuaternion.setFromUnitVectors(
-            childDirection,
-            targetDirection,
-        );
+            const mergedMesh = new THREE.Mesh(mergedGeometry);
+
+            const sampler = new MeshSurfaceSampler(mergedMesh).build();
+
+            const positionArray = new Float32Array(targetParticleCount * 3);
+            const tempPosition = new THREE.Vector3();
+
+            for (let i = 0; i < targetParticleCount; i++) {
+                sampler.sample(tempPosition);
+                positionArray[i * 3 + 0] = tempPosition.x;
+                positionArray[i * 3 + 1] = tempPosition.y;
+                positionArray[i * 3 + 2] = tempPosition.z;
+            }
+
+            const sampledGeometry = new THREE.BufferGeometry();
+            sampledGeometry.setAttribute(
+                "position",
+                new THREE.BufferAttribute(positionArray, 3),
+            );
+
+            // Scale the final point cloud up
+            sampledGeometry.scale(5, 5, 5);
+
+            this.particleSystem = new ParticleSystem(sampledGeometry);
+        }
     }
 
     update() {
-        if (this.projectGroup) {
-            // 1. Smoothly rotate the entire group toward the target (0.09 speed mimics the source)
-            this.projectGroup.quaternion.slerp(
-                this.targetGroupQuaternion,
-                0.09,
+        if (this.cube) {
+            this.cube.rotation.x += 0.01;
+            this.cube.rotation.y += 0.015;
+        }
+
+        if (this.particleSystem) {
+            this.raycaster.setFromCamera(
+                this.mouse,
+                this.experience.camera.instance,
             );
 
-            // 2. The exact billboarding math pulled from the original site
-            this.experience.camera.instance.getWorldQuaternion(
-                this._cameraWorldQuat,
-            );
-            this.projectGroup.getWorldQuaternion(this._groupWorldQuat);
+            this.raycaster.ray.intersectPlane(this.plane, this.planeIntersect);
 
-            this._groupInverseQuat
-                .copy(this._groupWorldQuat)
-                .invert()
-                .multiply(this._cameraWorldQuat);
+            const dist = this.planeIntersect.distanceTo(this.previousIntersect);
+            this.previousIntersect.copy(this.planeIntersect);
 
-            // 3. Apply it instantly to every plane
-            this.projectGroup.children.forEach((child) => {
-                child.quaternion.copy(this._groupInverseQuat);
-            });
+            const targetSpeed = Math.min(dist * 15.0, 1.0);
+
+            this.mouseSpeed += (targetSpeed - this.mouseSpeed) * 0.01;
+
+            this.particleSystem.mousePos.copy(this.planeIntersect);
+            this.particleSystem.uMouseSpeed.value = this.mouseSpeed;
+
+            this.particleSystem.update();
         }
     }
 }
